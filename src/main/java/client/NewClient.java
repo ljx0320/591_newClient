@@ -60,6 +60,8 @@ public class NewClient {
 				.setAlignmentContext(stateIdContext)
 				.build();
 		 */
+
+		clientRpcServer rpcServer = new clientRpcServer();
 		GlobalStateIdContext stateIdContext = new GlobalStateIdContext((fsn));
 		System.out.println("51");
 		// fsn.close();
