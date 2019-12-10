@@ -28,7 +28,7 @@ public class NewClient {
 	}*/
 	public static void main(String[] args) throws Exception{
 
-		BasicConfigurator.configure();
+		// BasicConfigurator.configure();
 		System.setProperty("hadoop.home.dir", "/");
 		System.out.println("NewClient");
 		Configuration conf = new HdfsConfiguration();
@@ -62,6 +62,6 @@ public class NewClient {
 		 */
 		GlobalStateIdContext stateIdContext = new GlobalStateIdContext((fsn));
 		System.out.println("51");
-		fsn.close();
+		// fsn.close();
 	}
 }
