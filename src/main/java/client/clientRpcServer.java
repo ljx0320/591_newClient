@@ -1,8 +1,240 @@
 package client;
 
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
+import static org.apache.hadoop.fs.CommonConfigurationKeys.IPC_MAXIMUM_DATA_LENGTH;
+import static org.apache.hadoop.fs.CommonConfigurationKeys.IPC_MAXIMUM_DATA_LENGTH_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HANDLER_COUNT_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HANDLER_COUNT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LIFELINE_HANDLER_COUNT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LIFELINE_HANDLER_RATIO_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LIFELINE_HANDLER_RATIO_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_HANDLER_COUNT_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_HANDLER_COUNT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_AUXILIARY_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_STATE_CONTEXT_ENABLED_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_STATE_CONTEXT_ENABLED_KEY;
+import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.MAX_PATH_DEPTH;
+import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.MAX_PATH_LENGTH;
 
+import static org.apache.hadoop.util.Time.now;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.security.PrivilegedExceptionAction;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.Callable;
+
+import com.google.common.collect.Lists;
+
+import org.apache.hadoop.HadoopIllegalArgumentException;
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.ReconfigurationTaskStatus;
+import org.apache.hadoop.crypto.CryptoProtocolVersion;
+import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
+import org.apache.hadoop.hdfs.AddBlockFlag;
+import org.apache.hadoop.fs.CacheFlag;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.ContentSummary;
+import org.apache.hadoop.fs.CreateFlag;
+import org.apache.hadoop.fs.FileAlreadyExistsException;
+import org.apache.hadoop.fs.FsServerDefaults;
+import org.apache.hadoop.fs.InvalidPathException;
+import org.apache.hadoop.fs.Options;
+import org.apache.hadoop.fs.ParentNotDirectoryException;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.fs.UnresolvedLinkException;
+import org.apache.hadoop.fs.XAttr;
+import org.apache.hadoop.fs.XAttrSetFlag;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.fs.QuotaUsage;
+import org.apache.hadoop.ha.HAServiceStatus;
+import org.apache.hadoop.ha.HealthCheckFailedException;
+import org.apache.hadoop.ha.ServiceFailedException;
+import org.apache.hadoop.ha.proto.HAServiceProtocolProtos.HAServiceProtocolService;
+import org.apache.hadoop.ha.protocolPB.HAServiceProtocolPB;
+import org.apache.hadoop.ha.protocolPB.HAServiceProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.HDFSPolicyProvider;
+import org.apache.hadoop.hdfs.inotify.EventBatch;
+import org.apache.hadoop.hdfs.inotify.EventBatchList;
+import org.apache.hadoop.hdfs.protocol.AclException;
+import org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException;
+import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
+import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
+import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+import org.apache.hadoop.hdfs.protocol.CorruptFileBlocks;
+import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
+import org.apache.hadoop.hdfs.protocol.DatanodeID;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.DirectoryListing;
+import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.FSLimitException;
+import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
+import org.apache.hadoop.hdfs.protocol.OpenFileEntry;
+import org.apache.hadoop.hdfs.protocol.QuotaByStorageTypeExceededException;
+import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
+import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
+import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
+import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
+import org.apache.hadoop.hdfs.protocol.UnresolvedPathException;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ClientNamenodeProtocol;
+import org.apache.hadoop.hdfs.protocol.proto.DatanodeLifelineProtocolProtos.DatanodeLifelineProtocolService;
+import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.DatanodeProtocolService;
+import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.NamenodeProtocolService;
+import org.apache.hadoop.hdfs.protocol.proto.ReconfigurationProtocolProtos.ReconfigurationProtocolService;
+import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolPB;
+import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.protocolPB.DatanodeLifelineProtocolPB;
+import org.apache.hadoop.hdfs.protocolPB.DatanodeLifelineProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolPB;
+import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.protocolPB.NamenodeProtocolPB;
+import org.apache.hadoop.hdfs.protocolPB.NamenodeProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.protocolPB.ReconfigurationProtocolPB;
+import org.apache.hadoop.hdfs.protocolPB.ReconfigurationProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.security.token.block.DataEncryptionKey;
+import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
+import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerFaultInjector;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
+import org.apache.hadoop.hdfs.server.common.HttpGetFailedException;
+import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
+import org.apache.hadoop.hdfs.server.namenode.NameNode.OperationCategory;
+import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
+import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
+import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
+import org.apache.hadoop.hdfs.server.protocol.FinalizeCommand;
+import org.apache.hadoop.hdfs.server.protocol.HeartbeatResponse;
+import org.apache.hadoop.hdfs.server.protocol.NamenodeCommand;
+import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
+import org.apache.hadoop.hdfs.server.protocol.NamenodeRegistration;
+import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+import org.apache.hadoop.hdfs.server.protocol.NodeRegistration;
+import org.apache.hadoop.hdfs.server.protocol.RegisterCommand;
+import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
+import org.apache.hadoop.hdfs.server.protocol.SlowDiskReports;
+import org.apache.hadoop.hdfs.server.protocol.SlowPeerReports;
+import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
+import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
+import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.GlobalStateIdContext;
+import org.apache.log4j.BasicConfigurator;
+import org.apache.hadoop.ipc.RPC;
+import com.google.protobuf.BlockingService;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ClientNamenodeProtocol;
+import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolPB;
+import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolServerSideTranslatorPB;
+import org.apache.hadoop.io.EnumSetWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.ipc.ProtobufRpcEngine;
+import org.apache.hadoop.ipc.RPC;
+import org.apache.hadoop.ipc.RetriableException;
+import org.apache.hadoop.ipc.RetryCache;
+import org.apache.hadoop.ipc.RetryCache.CacheEntry;
+import org.apache.hadoop.ipc.RetryCache.CacheEntryWithPayload;
+import org.apache.hadoop.ipc.Server;
+import org.apache.hadoop.ipc.StandbyException;
+import org.apache.hadoop.ipc.WritableRpcEngine;
+import org.apache.hadoop.ipc.RefreshRegistry;
+import org.apache.hadoop.ipc.RefreshResponse;
+import org.apache.hadoop.net.Node;
+import org.apache.hadoop.security.AccessControlException;
+import org.apache.hadoop.security.Groups;
+import org.apache.hadoop.security.SecurityUtil;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authorize.AuthorizationException;
+import org.apache.hadoop.security.authorize.ProxyUsers;
+import org.apache.hadoop.security.proto.RefreshAuthorizationPolicyProtocolProtos.RefreshAuthorizationPolicyProtocolService;
+import org.apache.hadoop.security.proto.RefreshUserMappingsProtocolProtos.RefreshUserMappingsProtocolService;
+import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolPB;
+import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolServerSideTranslatorPB;
+import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolPB;
+import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.proto.RefreshCallQueueProtocolProtos.RefreshCallQueueProtocolService;
+import org.apache.hadoop.ipc.protocolPB.GenericRefreshProtocolPB;
+import org.apache.hadoop.ipc.protocolPB.GenericRefreshProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.proto.GenericRefreshProtocolProtos.GenericRefreshProtocolService;
+import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.tools.proto.GetUserMappingsProtocolProtos.GetUserMappingsProtocolService;
+import org.apache.hadoop.tools.protocolPB.GetUserMappingsProtocolPB;
+import org.apache.hadoop.tools.protocolPB.GetUserMappingsProtocolServerSideTranslatorPB;
+import org.apache.hadoop.tracing.SpanReceiverInfo;
+import org.apache.hadoop.tracing.TraceAdminPB.TraceAdminService;
+import org.apache.hadoop.tracing.TraceAdminProtocolPB;
+import org.apache.hadoop.tracing.TraceAdminProtocolServerSideTranslatorPB;
+import org.apache.hadoop.util.VersionInfo;
+import org.apache.hadoop.util.VersionUtil;
+import org.slf4j.Logger;
+import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
+import org.apache.hadoop.hdfs.server.namenode.EditLogInputStream;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLog;
+import org.apache.hadoop.hdfs.server.namenode.CheckpointSignature;
+import org.apache.hadoop.hdfs.server.namenode.UnsupportedActionException;
+import org.apache.hadoop.hdfs.server.namenode.InotifyFSEditLogOpTranslator;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.protobuf.BlockingService;
+
+import javax.annotation.Nonnull;
 public class clientRpcServer implements ClientProtocol {
+    protected final FSNamesystem namesystem;
+    private final RetryCache retryCache;
+    private Configuration conf;
+    // constructor
+    public clientRpcServer() {
+        conf = new HdfsConfiguration();
+        conf.set("dfs.namenode.name.dir", "/hadoop/hdfs/name");
+        this.namesystem = FSNamesystem.loadFromDisk(conf);
+    }
+
+    /* optimize ugi lookup for RPC operations to avoid a trip through
+     * UGI.getCurrentUser which is synch'ed
+     */
+    public static UserGroupInformation getRemoteUser() throws IOException {
+        UserGroupInformation ugi = Server.getRemoteUser();
+        return (ugi != null) ? ugi : UserGroupInformation.getCurrentUser();
+    }
+
     @Override // ClientProtocol
     public Token<DelegationTokenIdentifier> getDelegationToken(Text renewer)
             throws IOException {
@@ -26,7 +258,7 @@ public class clientRpcServer implements ClientProtocol {
                                            long offset,
                                            long length)
             throws IOException {
-        metrics.incrGetBlockLocations();
+        // metrics.incrGetBlockLocations();
         LocatedBlocks locatedBlocks =
                 namesystem.getBlockLocations(getClientMachine(), src, offset, length);
         return locatedBlocks;
@@ -44,10 +276,6 @@ public class clientRpcServer implements ClientProtocol {
                                  CryptoProtocolVersion[] supportedVersions)
             throws IOException {
         String clientMachine = getClientMachine();
-        if (stateChangeLog.isDebugEnabled()) {
-            stateChangeLog.debug("*DIR* NameNode.create: file "
-                    +src+" for "+clientName+" at "+clientMachine);
-        }
         if (!checkPathLength(src)) {
             throw new IOException("create: Pathname too long.  Limit "
                     + MAX_PATH_LENGTH + " characters, " + MAX_PATH_DEPTH + " levels.");
@@ -69,8 +297,8 @@ public class clientRpcServer implements ClientProtocol {
             RetryCache.setState(cacheEntry, status != null, status);
         }
 
-        metrics.incrFilesCreated();
-        metrics.incrCreateFileOps();
+        // metrics.incrFilesCreated();
+        // metrics.incrCreateFileOps();
         return status;
     }
 
@@ -78,10 +306,6 @@ public class clientRpcServer implements ClientProtocol {
     public LastBlockWithStatus append(String src, String clientName,
                                       EnumSetWritable<CreateFlag> flag) throws IOException {
         String clientMachine = getClientMachine();
-        if (stateChangeLog.isDebugEnabled()) {
-            stateChangeLog.debug("*DIR* NameNode.append: file "
-                    +src+" for "+clientName+" at "+clientMachine);
-        }
         namesystem.checkOperation(OperationCategory.WRITE);
         CacheEntryWithPayload cacheEntry = RetryCache.waitForCompletion(retryCache,
                 null);
@@ -98,7 +322,7 @@ public class clientRpcServer implements ClientProtocol {
         } finally {
             RetryCache.setState(cacheEntry, success, info);
         }
-        metrics.incrFilesAppended();
+        // metrics.incrFilesAppended();
         return info;
     }
 
@@ -156,7 +380,7 @@ public class clientRpcServer implements ClientProtocol {
         LocatedBlock locatedBlock = namesystem.getAdditionalBlock(src, fileId,
                 clientName, previous, excludedNodes, favoredNodes, addBlockFlags);
         if (locatedBlock != null) {
-            metrics.incrAddBlockOps();
+            // metrics.incrAddBlockOps();
         }
         return locatedBlock;
     }
@@ -168,6 +392,7 @@ public class clientRpcServer implements ClientProtocol {
                                               final DatanodeInfo[] excludes,
                                               final int numAdditionalNodes, final String clientName
     ) throws IOException {
+        /*
         if (LOG.isDebugEnabled()) {
             LOG.debug("getAdditionalDatanode: src=" + src
                     + ", fileId=" + fileId
@@ -177,8 +402,8 @@ public class clientRpcServer implements ClientProtocol {
                     + ", numAdditionalNodes=" + numAdditionalNodes
                     + ", clientName=" + clientName);
         }
-
-        metrics.incrGetAdditionalDatanodeOps();
+        */
+        // metrics.incrGetAdditionalDatanodeOps();
 
         Set<Node> excludeSet = null;
         if (excludes != null) {
@@ -246,16 +471,6 @@ public class clientRpcServer implements ClientProtocol {
         }
     }
 
-    @Override // DatanodeProtocol
-    public void commitBlockSynchronization(ExtendedBlock block,
-                                           long newgenerationstamp, long newlength,
-                                           boolean closeFile, boolean deleteblock, DatanodeID[] newtargets,
-                                           String[] newtargetstorages)
-            throws IOException {
-        namesystem.commitBlockSynchronization(block, newgenerationstamp,
-                newlength, closeFile, deleteblock, newtargets, newtargetstorages);
-    }
-
     @Override // ClientProtocol
     public long getPreferredBlockSize(String filename)
             throws IOException {
@@ -265,9 +480,6 @@ public class clientRpcServer implements ClientProtocol {
     @Deprecated
     @Override // ClientProtocol
     public boolean rename(String src, String dst) throws IOException {
-        if(stateChangeLog.isDebugEnabled()) {
-            stateChangeLog.debug("*DIR* NameNode.rename: " + src + " to " + dst);
-        }
         if (!checkPathLength(dst)) {
             throw new IOException("rename: Pathname too long.  Limit "
                     + MAX_PATH_LENGTH + " characters, " + MAX_PATH_DEPTH + " levels.");
@@ -285,7 +497,7 @@ public class clientRpcServer implements ClientProtocol {
             RetryCache.setState(cacheEntry, ret);
         }
         if (ret) {
-            metrics.incrFilesRenamed();
+            // metrics.incrFilesRenamed();
         }
         return ret;
     }
@@ -310,9 +522,6 @@ public class clientRpcServer implements ClientProtocol {
     @Override // ClientProtocol
     public void rename2(String src, String dst, Options.Rename... options)
             throws IOException {
-        if(stateChangeLog.isDebugEnabled()) {
-            stateChangeLog.debug("*DIR* NameNode.rename: " + src + " to " + dst);
-        }
         if (!checkPathLength(dst)) {
             throw new IOException("rename: Pathname too long.  Limit "
                     + MAX_PATH_LENGTH + " characters, " + MAX_PATH_DEPTH + " levels.");
@@ -329,32 +538,24 @@ public class clientRpcServer implements ClientProtocol {
         } finally {
             RetryCache.setState(cacheEntry, success);
         }
-        metrics.incrFilesRenamed();
+        // metrics.incrFilesRenamed();
     }
 
     @Override // ClientProtocol
     public boolean truncate(String src, long newLength, String clientName)
             throws IOException {
-        if(stateChangeLog.isDebugEnabled()) {
-            stateChangeLog.debug("*DIR* NameNode.truncate: " + src + " to " +
-                    newLength);
-        }
         String clientMachine = getClientMachine();
         try {
             return namesystem.truncate(
                     src, newLength, clientName, clientMachine, now());
         } finally {
-            metrics.incrFilesTruncated();
+            // metrics.incrFilesTruncated();
         }
     }
 
     @Override // ClientProtocol
     public boolean delete(String src, boolean recursive) throws IOException {
 
-        if (stateChangeLog.isDebugEnabled()) {
-            stateChangeLog.debug("*DIR* Namenode.delete: src=" + src
-                    + ", recursive=" + recursive);
-        }
         namesystem.checkOperation(OperationCategory.WRITE);
         CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
         if (cacheEntry != null && cacheEntry.isSuccess()) {
@@ -368,7 +569,7 @@ public class clientRpcServer implements ClientProtocol {
             RetryCache.setState(cacheEntry, ret);
         }
         if (ret)
-            metrics.incrDeleteFileOps();
+            // metrics.incrDeleteFileOps();
         return ret;
     }
 
@@ -386,9 +587,6 @@ public class clientRpcServer implements ClientProtocol {
     @Override // ClientProtocol
     public boolean mkdirs(String src, FsPermission masked, boolean createParent)
             throws IOException {
-        if(stateChangeLog.isDebugEnabled()) {
-            stateChangeLog.debug("*DIR* NameNode.mkdirs: " + src);
-        }
         if (!checkPathLength(src)) {
             throw new IOException("mkdirs: Pathname too long.  Limit "
                     + MAX_PATH_LENGTH + " characters, " + MAX_PATH_DEPTH + " levels.");
@@ -409,15 +607,15 @@ public class clientRpcServer implements ClientProtocol {
         DirectoryListing files = namesystem.getListing(
                 src, startAfter, needLocation);
         if (files != null) {
-            metrics.incrGetListingOps();
-            metrics.incrFilesInGetListingOps(files.getPartialListing().length);
+            // metrics.incrGetListingOps();
+            // metrics.incrFilesInGetListingOps(files.getPartialListing().length);
         }
         return files;
     }
 
     @Override // ClientProtocol
     public HdfsFileStatus getFileInfo(String src)  throws IOException {
-        metrics.incrFileInfoOps();
+        // metrics.incrFileInfoOps();
         return namesystem.getFileInfo(src, true);
     }
 
@@ -428,7 +626,7 @@ public class clientRpcServer implements ClientProtocol {
 
     @Override // ClientProtocol
     public HdfsFileStatus getFileLinkInfo(String src) throws IOException {
-        metrics.incrFileInfoOps();
+        // metrics.incrFileInfoOps();
         return namesystem.getFileInfo(src, false);
     }
 
@@ -505,7 +703,7 @@ public class clientRpcServer implements ClientProtocol {
 
     @Override // ClientProtocol
     public RollingUpgradeInfo rollingUpgrade(RollingUpgradeAction action) throws IOException {
-        LOG.info("rollingUpgrade " + action);
+        // LOG.info("rollingUpgrade " + action);
         switch(action) {
             case QUERY:
                 return namesystem.queryRollingUpgrade();
@@ -537,7 +735,8 @@ public class clientRpcServer implements ClientProtocol {
 
     @Override // ClientProtocol
     public HAServiceState getHAServiceState() throws IOException {
-        return nn.getServiceStatus().getState();
+        // return nn.getServiceStatus().getState();
+        return HAServiceState.OBSERVER;
     }
 
     @Override // ClientProtocol
@@ -630,7 +829,7 @@ public class clientRpcServer implements ClientProtocol {
 
     @Override // ClientProtocol
     public String getLinkTarget(String path) throws IOException {
-        metrics.incrGetLinkTargetOps();
+        // metrics.incrGetLinkTargetOps();
         HdfsFileStatus stat = null;
         try {
             stat = namesystem.getFileInfo(path, false);
@@ -653,9 +852,12 @@ public class clientRpcServer implements ClientProtocol {
         final String id = nodeReg.getRegistrationID();
         final String expectedID = namesystem.getRegistrationID();
         if (!expectedID.equals(id)) {
+            /*
             LOG.warn("Registration IDs mismatched: the "
                     + nodeReg.getClass().getSimpleName() + " ID is " + id
                     + " but the expected ID is " + expectedID);
+
+             */
             throw new UnregisteredNodeException(nodeReg);
         }
     }
@@ -674,28 +876,31 @@ public class clientRpcServer implements ClientProtocol {
     private void verifySoftwareVersion(DatanodeRegistration dnReg)
             throws IncorrectVersionException {
         String dnVersion = dnReg.getSoftwareVersion();
+        /*
         if (VersionUtil.compareVersions(dnVersion, minimumDataNodeVersion) < 0) {
             IncorrectVersionException ive = new IncorrectVersionException(
                     minimumDataNodeVersion, dnVersion, "DataNode", "NameNode");
-            LOG.warn(ive.getMessage() + " DN: " + dnReg);
+            // LOG.warn(ive.getMessage() + " DN: " + dnReg);
             throw ive;
         }
+         */
         String nnVersion = VersionInfo.getVersion();
         if (!dnVersion.equals(nnVersion)) {
             String messagePrefix = "Reported DataNode version '" + dnVersion +
                     "' of DN " + dnReg + " does not match NameNode version '" +
                     nnVersion + "'";
-            long nnCTime = nn.getFSImage().getStorage().getCTime();
+            // long nnCTime = nn.getFSImage().getStorage().getCTime();
+            long nnCTime = namesystem.getFSImage().getStorage().getCTime();
             long dnCTime = dnReg.getStorageInfo().getCTime();
             if (nnCTime != dnCTime) {
                 IncorrectVersionException ive = new IncorrectVersionException(
                         messagePrefix + " and CTime of DN ('" + dnCTime +
                                 "') does not match CTime of NN ('" + nnCTime + "')");
-                LOG.warn(ive.toString(), ive);
+                // LOG.warn(ive.toString(), ive);
                 throw ive;
             } else {
-                LOG.info(messagePrefix +
-                        ". Note: This is normal during a rolling upgrade.");
+                // LOG.info(messagePrefix +
+                   //     ". Note: This is normal during a rolling upgrade.");
             }
         }
     }
@@ -738,7 +943,7 @@ public class clientRpcServer implements ClientProtocol {
             return (String) cacheEntry.getPayload();
         }
 
-        metrics.incrCreateSnapshotOps();
+        // metrics.incrCreateSnapshotOps();
         String ret = null;
         try {
             ret = namesystem.createSnapshot(snapshotRoot, snapshotName,
@@ -756,7 +961,7 @@ public class clientRpcServer implements ClientProtocol {
             throw new IOException("The snapshot name is null or empty.");
         }
         namesystem.checkOperation(OperationCategory.WRITE);
-        metrics.incrDeleteSnapshotOps();
+        // metrics.incrDeleteSnapshotOps();
         CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
         if (cacheEntry != null && cacheEntry.isSuccess()) {
             return; // Return previous response
@@ -773,14 +978,14 @@ public class clientRpcServer implements ClientProtocol {
     @Override
     // Client Protocol
     public void allowSnapshot(String snapshotRoot) throws IOException {
-        metrics.incrAllowSnapshotOps();
+        // metrics.incrAllowSnapshotOps();
         namesystem.allowSnapshot(snapshotRoot);
     }
 
     @Override
     // Client Protocol
     public void disallowSnapshot(String snapshot) throws IOException {
-        metrics.incrDisAllowSnapshotOps();
+        // metrics.incrDisAllowSnapshotOps();
         namesystem.disallowSnapshot(snapshot);
     }
 
@@ -792,7 +997,7 @@ public class clientRpcServer implements ClientProtocol {
             throw new IOException("The new snapshot name is null or empty.");
         }
         namesystem.checkOperation(OperationCategory.WRITE);
-        metrics.incrRenameSnapshotOps();
+        // metrics.incrRenameSnapshotOps();
         CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
         if (cacheEntry != null && cacheEntry.isSuccess()) {
             return; // Return previous response
@@ -812,7 +1017,7 @@ public class clientRpcServer implements ClientProtocol {
             throws IOException {
         SnapshottableDirectoryStatus[] status = namesystem
                 .getSnapshottableDirListing();
-        metrics.incrListSnapshottableDirOps();
+        // metrics.incrListSnapshottableDirOps();
         return status;
     }
 
@@ -821,7 +1026,7 @@ public class clientRpcServer implements ClientProtocol {
                                                     String earlierSnapshotName, String laterSnapshotName) throws IOException {
         SnapshotDiffReport report = namesystem.getSnapshotDiffReport(snapshotRoot,
                 earlierSnapshotName, laterSnapshotName);
-        metrics.incrSnapshotDiffReportOps();
+        // metrics.incrSnapshotDiffReportOps();
         return report;
     }
 
@@ -1073,10 +1278,10 @@ public class clientRpcServer implements ClientProtocol {
             // no-QJM case only) if a in-progress segment is finalized under us ...
             // no need to throw an exception back to the client in this case
         } catch (FileNotFoundException e) {
-            LOG.debug("Tried to read from deleted or moved edit log segment", e);
+            // LOG.debug("Tried to read from deleted or moved edit log segment", e);
             return null;
         } catch (HttpGetFailedException e) {
-            LOG.debug("Tried to read from deleted edit log segment", e);
+            // LOG.debug("Tried to read from deleted edit log segment", e);
             return null;
         }
     }
@@ -1085,7 +1290,12 @@ public class clientRpcServer implements ClientProtocol {
     public EventBatchList getEditsFromTxid(final long txid) throws IOException {
         namesystem.checkOperation(OperationCategory.READ); // only active
         namesystem.checkSuperuserPrivilege();
+        /*
         final int maxEventsPerRPC = nn.getConf().getInt(
+                DFSConfigKeys.DFS_NAMENODE_INOTIFY_MAX_EVENTS_PER_RPC_KEY,
+                DFSConfigKeys.DFS_NAMENODE_INOTIFY_MAX_EVENTS_PER_RPC_DEFAULT);
+         */
+        final int maxEventsPerRPC = this.conf.getInt(
                 DFSConfigKeys.DFS_NAMENODE_INOTIFY_MAX_EVENTS_PER_RPC_KEY,
                 DFSConfigKeys.DFS_NAMENODE_INOTIFY_MAX_EVENTS_PER_RPC_DEFAULT);
         final FSEditLog log = namesystem.getFSImage().getEditLog();
@@ -1135,8 +1345,11 @@ public class clientRpcServer implements ClientProtocol {
             // transitioned out of active and haven't yet transitioned to standby
             // and are using QJM -- the edit log will be closed and this exception
             // will result
+            /*
             LOG.info("NN is transitioning from active to standby and FSEditLog " +
                     "is closed -- could not read edits");
+
+             */
             return new EventBatchList(batches, firstSeenTxid, maxSeenTxid, syncTxid);
         }
 
@@ -1183,4 +1396,5 @@ public class clientRpcServer implements ClientProtocol {
 
         return new EventBatchList(batches, firstSeenTxid, maxSeenTxid, syncTxid);
     }
+
 }
