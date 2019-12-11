@@ -34,7 +34,6 @@ public class NewClient {
 		Configuration conf = new HdfsConfiguration();
 		System.out.println("12");
 		conf.set("dfs.namenode.name.dir", "/hadoop/hdfs/name");
-		// FSNamesystem nameSystem = new FSNamesystem(conf, null, true);
 		System.out.println("14");
 		FSNamesystem fsn = FSNamesystem.loadFromDisk(conf);
 		System.out.println("16");
@@ -61,9 +60,10 @@ public class NewClient {
 				.build();
 		 */
 
-		clientRpcServer rpcServer = new clientRpcServer();
-		GlobalStateIdContext stateIdContext = new GlobalStateIdContext((fsn));
+		server rpcServer = new server(fsn);
+		rpcServer.start();
+		//rpcServer.stop();
+		//fsn.close();
 		System.out.println("51");
-		// fsn.close();
 	}
 }

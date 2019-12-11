@@ -34,7 +34,6 @@ import com.google.common.collect.Lists;
 
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.ReconfigurationTaskStatus;
 import org.apache.hadoop.crypto.CryptoProtocolVersion;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
@@ -103,13 +102,10 @@ import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
 import org.apache.hadoop.hdfs.protocol.UnresolvedPathException;
-import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ClientNamenodeProtocol;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeLifelineProtocolProtos.DatanodeLifelineProtocolService;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.DatanodeProtocolService;
 import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.NamenodeProtocolService;
 import org.apache.hadoop.hdfs.protocol.proto.ReconfigurationProtocolProtos.ReconfigurationProtocolService;
-import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolPB;
-import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolServerSideTranslatorPB;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeLifelineProtocolPB;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeLifelineProtocolServerSideTranslatorPB;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolPB;
@@ -156,14 +152,12 @@ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.GlobalStateIdContext;
 import org.apache.log4j.BasicConfigurator;
 import org.apache.hadoop.ipc.RPC;
-import com.google.protobuf.BlockingService;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ClientNamenodeProtocol;
 import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolPB;
 import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolServerSideTranslatorPB;
 import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
-import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.RetriableException;
 import org.apache.hadoop.ipc.RetryCache;
 import org.apache.hadoop.ipc.RetryCache.CacheEntry;
@@ -216,15 +210,89 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.protobuf.BlockingService;
 
 import javax.annotation.Nonnull;
-public class clientRpcServer implements ClientProtocol {
+public class server implements ClientProtocol {
     protected final FSNamesystem namesystem;
     private final RetryCache retryCache;
     private Configuration conf;
+    RPC.Server rpcServer;
     // constructor
-    public clientRpcServer() {
+    public server(FSNamesystem fsn) throws IOException{
         conf = new HdfsConfiguration();
         conf.set("dfs.namenode.name.dir", "/hadoop/hdfs/name");
-        this.namesystem = FSNamesystem.loadFromDisk(conf);
+        this.namesystem = fsn;
+        this.retryCache = namesystem.getRetryCache();
+
+        ClientNamenodeProtocolServerSideTranslatorPB
+                clientProtocolServerTranslator =
+                new ClientNamenodeProtocolServerSideTranslatorPB(this);
+        BlockingService clientNNPbService = ClientNamenodeProtocol.
+                newReflectiveBlockingService(clientProtocolServerTranslator);
+        GlobalStateIdContext stateIdContext = new GlobalStateIdContext((namesystem));
+
+        RPC.setProtocolEngine(conf, ClientNamenodeProtocolPB.class,
+                ProtobufRpcEngine.class);
+
+        this.rpcServer = new RPC.Builder(conf)
+                .setProtocol(
+                        org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolPB.class)
+                .setInstance(clientNNPbService).setBindAddress("35.3.80.176")
+                .setPort(8001).setNumHandlers(1)
+                .setVerbose(false)
+                .setSecretManager(namesystem.getDelegationTokenSecretManager())
+                .setAlignmentContext(stateIdContext)
+                .build();
+
+/*
+        NamenodeProtocolServerSideTranslatorPB namenodeProtocolXlator =
+                new NamenodeProtocolServerSideTranslatorPB(this);
+        BlockingService NNPbService = NamenodeProtocolService
+                .newReflectiveBlockingService(namenodeProtocolXlator);
+        RefreshUserMappingsProtocolServerSideTranslatorPB refreshUserMappingXlator =
+                new RefreshUserMappingsProtocolServerSideTranslatorPB(this);
+        BlockingService refreshUserMappingService = RefreshUserMappingsProtocolService
+                .newReflectiveBlockingService(refreshUserMappingXlator);
+        RefreshCallQueueProtocolServerSideTranslatorPB refreshCallQueueXlator =
+                new RefreshCallQueueProtocolServerSideTranslatorPB(this);
+        BlockingService refreshCallQueueService = RefreshCallQueueProtocolService
+                .newReflectiveBlockingService(refreshCallQueueXlator);
+        GenericRefreshProtocolServerSideTranslatorPB genericRefreshXlator =
+                new GenericRefreshProtocolServerSideTranslatorPB(this);
+        BlockingService genericRefreshService = GenericRefreshProtocolService
+                .newReflectiveBlockingService(genericRefreshXlator);
+
+        GetUserMappingsProtocolServerSideTranslatorPB getUserMappingXlator =
+                new GetUserMappingsProtocolServerSideTranslatorPB(this);
+        BlockingService getUserMappingService = GetUserMappingsProtocolService
+                .newReflectiveBlockingService(getUserMappingXlator);
+        TraceAdminProtocolServerSideTranslatorPB traceAdminXlator =
+                new TraceAdminProtocolServerSideTranslatorPB(this);
+        BlockingService traceAdminService = TraceAdminService
+                .newReflectiveBlockingService(traceAdminXlator);
+
+        DFSUtil.addPBProtocol(conf, NamenodeProtocolPB.class, NNPbService,
+                server);
+        DFSUtil.addPBProtocol(conf, RefreshUserMappingsProtocolPB.class,
+                refreshUserMappingService, server);
+        DFSUtil.addPBProtocol(conf, RefreshCallQueueProtocolPB.class,
+                refreshCallQueueService, server);
+        DFSUtil.addPBProtocol(conf, GenericRefreshProtocolPB.class,
+                genericRefreshService, server);
+        DFSUtil.addPBProtocol(conf, GetUserMappingsProtocolPB.class,
+                getUserMappingService, server);
+        DFSUtil.addPBProtocol(conf, TraceAdminProtocolPB.class,
+                traceAdminService, server);
+
+ */
+    }
+
+    void start() {
+        this.rpcServer.start();
+    }
+    void join() throws InterruptedException {
+        this.rpcServer.join();
+    }
+    void stop() {
+        this.rpcServer.stop();
     }
 
     /* optimize ugi lookup for RPC operations to avoid a trip through
@@ -568,8 +636,10 @@ public class clientRpcServer implements ClientProtocol {
         } finally {
             RetryCache.setState(cacheEntry, ret);
         }
+        /*
         if (ret)
-            // metrics.incrDeleteFileOps();
+            metrics.incrDeleteFileOps();
+         */
         return ret;
     }
 
