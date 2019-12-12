@@ -33,7 +33,7 @@ public class NewClient {
 		System.out.println("NewClient");
 		Configuration conf = new HdfsConfiguration();
 		System.out.println("12");
-		conf.set("dfs.namenode.name.dir", "/hadoop/hdfs/name");
+		conf.set("dfs.namenode.name.dir", "/home/hadoop2/Downloads/hadoop-2.10.0-src/hadoop-dist/target/hadoop-2.10.0/hdfs/namenode");
 		System.out.println("14");
 		FSNamesystem fsn = FSNamesystem.loadFromDisk(conf);
 		System.out.println("16");

@@ -18,18 +18,7 @@
 
 <configuration>
     <property>
-        <name>hadoop.tmp.dir</name>
-        <value>file:/hadoop/tmp</value>
-        <description>Abase for other temporary directories.</description>
-    </property>
-
-    <property>
-      <name>fs.defaultFS</name>
-      <value>hdfs://mycluster</value>
-    </property>
-
-    <property>
-      <name>dfs.journalnode.edits.dir</name>
-      <value>/hadoop/tmp/dfs/journalnode</value>
+        <name>fs.defaultFS</name>
+        <value>hdfs://localhost:9000</value>
     </property>
 </configuration>

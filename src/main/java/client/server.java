@@ -235,8 +235,8 @@ public class server implements ClientProtocol {
         this.rpcServer = new RPC.Builder(conf)
                 .setProtocol(
                         org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolPB.class)
-                .setInstance(clientNNPbService).setBindAddress("35.3.80.176")
-                .setPort(8001).setNumHandlers(1)
+                .setInstance(clientNNPbService).setBindAddress("127.0.0.1")
+                .setPort(9001).setNumHandlers(1)
                 .setVerbose(false)
                 .setSecretManager(namesystem.getDelegationTokenSecretManager())
                 .setAlignmentContext(stateIdContext)
@@ -1463,7 +1463,6 @@ public class server implements ClientProtocol {
                 break;
             }
         }
-
         return new EventBatchList(batches, firstSeenTxid, maxSeenTxid, syncTxid);
     }
 
