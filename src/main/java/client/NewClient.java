@@ -27,7 +27,6 @@ public class NewClient {
 				.build();
 	}*/
 	public static void main(String[] args) throws Exception{
-
 		// BasicConfigurator.configure();
 		System.setProperty("hadoop.home.dir", "/");
 		System.out.println("NewClient");
@@ -60,10 +59,9 @@ public class NewClient {
 				.build();
 		 */
 
-		server rpcServer = new server(fsn);
+		server rpcServer = new server();
 		rpcServer.start();
 		//rpcServer.stop();
 		//fsn.close();
-		System.out.println("51");
 	}
 }

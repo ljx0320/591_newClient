@@ -211,15 +211,38 @@ import com.google.protobuf.BlockingService;
 
 import javax.annotation.Nonnull;
 public class server implements ClientProtocol {
-    protected final FSNamesystem namesystem;
-    private final RetryCache retryCache;
+    private FSNamesystem namesystem;
+    private RetryCache retryCache;
     private Configuration conf;
     RPC.Server rpcServer;
     // constructor
-    public server(FSNamesystem fsn) throws IOException{
+    /*
+    class updateImageThread extends Thread {
+        public void run() {
+            while (true) {
+                try {
+                    conf = new HdfsConfiguration();
+                    conf.set("dfs.namenode.name.dir", "/hadoop/hdfs/name");
+                    server.this.namesystem = FSNamesystem.loadFromDisk(conf);
+                    server.this.retryCache = server.this.namesystem.getRetryCache();
+                }
+                catch(IOException e) {
+                    server.this.namesystem.close();
+                }
+                try {
+                    Thread.sleep(10000);
+                }
+                catch (InterruptedException e) {
+                    server.this.namesystem.close();
+                }
+            }
+        }
+    }
+    */
+    public server() throws IOException{
         conf = new HdfsConfiguration();
         conf.set("dfs.namenode.name.dir", "/hadoop/hdfs/name");
-        this.namesystem = fsn;
+        this.namesystem = FSNamesystem.loadFromDisk(conf);
         this.retryCache = namesystem.getRetryCache();
 
         ClientNamenodeProtocolServerSideTranslatorPB
@@ -241,7 +264,8 @@ public class server implements ClientProtocol {
                 .setSecretManager(namesystem.getDelegationTokenSecretManager())
                 .setAlignmentContext(stateIdContext)
                 .build();
-
+        // updateImageThread t1 = new updateImageThread();
+        // t1.start();
 /*
         NamenodeProtocolServerSideTranslatorPB namenodeProtocolXlator =
                 new NamenodeProtocolServerSideTranslatorPB(this);
